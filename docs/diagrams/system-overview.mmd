@@ -1,0 +1,17 @@
+%%{init: {'theme':'neutral', 'themeVariables': {'lineColor':'#94a3b8'}}}%%
+graph TB
+    Client["WebSocket Client<br/>(Chat UI)"]
+    Server["FastAPI Server<br/>Session Manager"]
+    Gateway["AI Gateway<br/>Turn Executor"]
+    Graph["LangGraph<br/>Agent Graph"]
+    MCP["MCP Client<br/>Tool Sourcing"]
+    Models["Bedrock<br/>Model Provider"]
+    Memory["AgentCore<br/>Persistence"]
+    
+    Client -->|Session ID| Server
+    Server -->|Create/Resume| Gateway
+    Gateway -->|Execute Turn| Graph
+    Graph -->|Bind Tools| MCP
+    Graph -->|Model Call| Models
+    Graph -->|Checkpoint| Memory
+    Gateway -->|Stream Events| Client

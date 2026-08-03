@@ -1,0 +1,28 @@
+%%{init: {'theme':'neutral', 'themeVariables': {'lineColor':'#94a3b8'}}}%%
+graph LR
+    A["User sends<br/>message"] -->|JSON over WS| B["Session Manager"]
+    B -->|Resume or Create| C["AI Gateway"]
+    C -->|Load| D["AgentCore Memory"]
+    D -->|State| C
+    
+    C -->|Execute| E["Middleware Chain"]
+    E -->|Invoke| F["LangGraph"]
+    
+    F -->|List| G["MCP Server"]
+    G -->|Tools| F
+    
+    F -->|Call Model| H["Bedrock"]
+    H -->|Response| F
+    
+    F -->|Execute Tool| G
+    G -->|Result| F
+    
+    F -->|Check Policy| I["HITL Policy"]
+    I -->|Requires Approval| F
+    
+    F -->|Save| D
+    D -->|Checkpoint| F
+    
+    E -->|Emit Events| C
+    C -->|Stream over WS| J["Chat UI"]
+    J -->|Display| A

@@ -1,0 +1,50 @@
+%%{init: {'theme':'neutral', 'themeVariables': {'lineColor':'#94a3b8'}}}%%
+sequenceDiagram
+    participant User as Chat UI
+    participant Session as Session Manager
+    participant Gateway as AI Gateway
+    participant Middleware as Middleware Chain
+    participant Graph as LangGraph
+    participant MCP as MCP Client
+    participant Model as Bedrock
+    participant Memory as AgentCore
+    
+    User->>Session: init (session_id)
+    Session->>Gateway: Get or create gateway
+    User->>Session: turn (user_text)
+    Session->>Gateway: Execute turn
+    
+    activate Gateway
+    Gateway->>Memory: Load session state
+    Gateway->>Middleware: Lifecycle middleware (before)
+    
+    activate Middleware
+    Middleware->>Graph: Invoke with turn context
+    
+    activate Graph
+    Graph->>MCP: List available tools
+    MCP->>Model: Bind tools
+    
+    loop Tool calls
+        Graph->>Model: Call model with messages + tools
+        Model->>Graph: Tool calls + text
+        
+        alt Requires HITL approval
+            Graph->>Gateway: Emit HITL interrupt
+            deactivate Graph
+            Gateway->>User: Stream HITL decision request
+            User->>Gateway: hitl_decisions (approve/reject/respond)
+            activate Graph
+        end
+        
+        Graph->>MCP: Execute tool
+        MCP->>Graph: Tool result
+    end
+    
+    Graph->>Graph: Generate final response
+    deactivate Graph
+    
+    Middleware->>Memory: Write turn summary
+    deactivate Middleware
+    Gateway->>User: Stream text + summary
+    deactivate Gateway
