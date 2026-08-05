@@ -40,7 +40,8 @@ A production-shaped LangGraph AI agent with middleware execution engine, human-i
   ```
 - **Key features**:
   - Tools are bound on every model call (no static graph)
-  - System prompt fetched from MCP server
+  - System prompt is a static local placeholder (`agent/system_prompt.py`) —
+    the companion `mcp-server-template` registers tools only, no MCP prompts
   - Supports tool parallel calling
   - HITL interrupts via `interrupt()` on specific tool calls
 
@@ -77,6 +78,38 @@ Each middleware is independent, testable, and composed in order:
    - `middleware/risk_classifier.py` - Classify tools by risk level
    - Naming convention: `get_*` = readonly, else = mutation
    - Policy is re-derived for demo domain (not hardcoded product workflow)
+
+### Orchestration Tool (`run_orchestration`)
+
+- **Files**: `agent/orchestration/orchestration_tool.py`, `sandbox.py`, `tool_bridge.py`
+- **What it is**: a local, in-process RestrictedPython sandbox for calling
+  this agent's OWN already-bound tools in a dependent chain/branch/reshape/
+  loop — a script does in one round trip what would otherwise take one model
+  round trip per step.
+- **Gated by**: `AGENT_ORCHESTRATION_ENABLED` only — no external AWS resource.
+- **Safety boundary**: `tool_bridge.py`'s policy only allows read-only
+  (`get_*`) tools through the sandbox. Mutations are refused from inside a
+  script — HITL cannot see calls made through the bridge, so allowing them
+  would be a real approval bypass. Mutations still work as normal tool calls
+  outside the sandbox, where HITL applies as usual.
+- **Not the same as `run_python` below** — no pandas/numpy/plotly, no math.
+
+### Code Execution Tool (`run_python`)
+
+- **Files**: `analysis/code_exec_tool.py`, `code_execution_service.py`, `sandbox.py`
+- **What it is**: a remote AgentCore Code Interpreter sandbox for data
+  analysis, statistics, and Plotly charts. Has NO access to this agent's own
+  tools at all — data must be fetched via normal tool calls first, then
+  passed into the Python code as a literal.
+- **Gated by**: `AGENTCORE_CODE_INTERPRETER_ID` presence — no separate
+  enabled flag (same id-presence pattern as AgentCore memory/KB).
+- **Lifecycle**: self-contained per call — start a sandbox, run the code,
+  download any produced files, stop the sandbox. No cross-call reuse, so
+  each call must be a complete analysis (fetch/build data, compute, save any
+  chart) in one shot.
+- **Output**: chart/data files are registered for download at
+  `GET /api/agent/download/{file_id}` and returned to the model as
+  ready-to-paste markdown image/link syntax.
 
 ### MCP Client Integration
 
@@ -135,15 +168,16 @@ Each middleware is independent, testable, and composed in order:
 
 ### Wire Protocol & Streaming
 
-- **File**: `agent/middleware/v3_wire.py`
-- **Event types**:
-  - `TextDeltaEvent` - Streaming token from model
-  - `ToolAutoEvent` - Tool execution without HITL
-  - `HitlEvent` - Tool requiring human approval
-  - `ToolResultEvent` - Tool execution result
-  - `ThinkingEvent` - Internal reasoning (if extended thinking enabled)
-  - `DoneEvent` - Turn complete
-  - `ErrorEvent` - Turn failed
+- **File**: `agent/wire.py` (moved out of `middleware/` — not an
+  `AgentMiddleware` subclass)
+- **Event types** (plain dicts with a `type` key, not classes):
+  - `text_delta` - Streaming token from model
+  - `text_commit` - Narration/answer committed at a tool-call boundary or
+    turn end
+  - `tool_auto` - Tool executed without HITL
+  - `activity` - A tool result surfaced as a status line
+  - `hitl_request` - One or more tool calls awaiting human approval
+  - `status` / `warning` / `perf` / `done` / `error` - turn lifecycle events
 
 - **Streaming strategy**: Emit events in arrival order
   - Text deltas: immediate
@@ -217,6 +251,8 @@ Environment variables (all `AGENT_` prefixed):
 - `CLAUDE.md` - Implementation details and working conventions
 - `TASKS.md` - Build task breakdown (gitignored)
 - `README.md` - User-facing pitch
+- `DEMO-QUERIES.md` - One example query per feature, for manual smoke-testing
+  or demoing (plain tool call, HITL, orchestration, memory, code execution)
 
 
 

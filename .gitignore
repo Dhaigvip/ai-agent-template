@@ -13,4 +13,5 @@ build/
 *.log
 CLAUDE.md
 TASKS.md
+HANDOVER-*.md
 

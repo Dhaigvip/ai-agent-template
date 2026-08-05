@@ -1,8 +1,22 @@
 # ai-agent-template
 
-A production-shaped LangGraph AI agent: a middleware execution engine,
-human-in-the-loop with stateless resume, tools sourced from an MCP server,
-and a set of optional modules that default off until you configure them.
+Most agent demos call a tool and print the result. They don't show what
+happens when a tool call needs a human to say yes first and the server
+restarts mid-decision, when the token bill for describing a few dozen tools
+on every turn quietly eats your margin, or when a mutation gets buried three
+layers inside a sandboxed script where nothing can review it before it runs.
+
+`ai-agent-template` is a LangGraph agent on Bedrock built around those
+specific failure modes: human-in-the-loop approval that survives a restart
+because the interrupt lives in the checkpoint, not the process; prompt
+caching that's actually measured instead of just claimed; tools sourced
+entirely from a companion MCP server instead of hand-registered one by one;
+and two different code-execution tools with two different, deliberately
+different, safety postures — one that can call this agent's own tools but
+only the read-only ones, one that can do real math but can't touch this
+agent's tools at all. It's meant to be read and adapted, not just run —
+every non-obvious decision is a comment where it bites, not a design doc
+you have to trust.
 
 ## What this is
 
@@ -26,10 +40,15 @@ and a set of optional modules that default off until you configure them.
   zero is worse than no counter at all.
 - **Optional modules, every one off by default** — AgentCore-backed memory
   and persistence, Bedrock Knowledge Base retrieval, ADOT tracing/metrics,
-  CloudWatch log shipping, an input guardrail. The agent completes a full
-  turn with all of them unset; each is a single env var away from being
-  enabled once you've configured the underlying AWS resource.
-- **WebSocket API** at `/api/agent`, plus a `/health` endpoint.
+  CloudWatch log shipping, an input guardrail, and two distinct code-running
+  tools: `run_orchestration` (local, calls this agent's own tools, no math)
+  and `run_python` (remote AgentCore sandbox, math/charts, no access to this
+  agent's own tools — see `ARCHITECTURE.md` for the full distinction). The
+  agent completes a full turn with all of them unset; each is a single env
+  var away from being enabled once you've configured the underlying AWS
+  resource.
+- **WebSocket API** at `/api/agent`, plus `/health` and
+  `/api/agent/download/{file_id}` (charts/files `run_python` produces).
 
 ## Current provider scope
 
@@ -44,29 +63,100 @@ the prompt-cache middleware and the model client itself.
 
 ## Quickstart
 
-Requires **Python 3.12+**.
+This walks through everything needed to get a real turn working, in order —
+each step says what breaks if you skip it.
+
+### 1. Prerequisites
+
+- **Python 3.12+**
+- An **AWS account with Bedrock model access enabled** for whichever Claude
+  model you plan to use, in whichever region you plan to use. This is a
+  one-time per-account/per-region step done in the AWS Console (Bedrock >
+  Model access) — nothing in this template can do it for you, and every
+  call fails until it's done.
+- A way to authenticate to AWS: an `AWS_PROFILE` (local named profile), a
+  `BEDROCK_API_KEY` (bearer token), or explicit
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` (useful for
+  CI runners, containers, or temporary STS credentials with no local
+  profile). There's no offline fallback for the model call — the agent
+  needs real credentials to start a turn.
+  **`BEDROCK_API_KEY` only covers plain Bedrock model calls** — it does
+  NOT authenticate AgentCore APIs (memory, code interpreter). If you plan
+  to enable `AGENTCORE_MEMORY_ID` or `AGENTCORE_CODE_INTERPRETER_ID` in
+  step 5, use `AWS_PROFILE` or the explicit access-key triple instead.
+
+### 2. Install and configure
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e .
 copy .env.example .env
-# edit .env: set AWS_REGION and either AWS_PROFILE or BEDROCK_API_KEY
+```
+
+Edit `.env`:
+- `AWS_REGION` — required, no default (this template deliberately never
+  guesses a region for you)
+- One of the credential options from step 1
+- `AGENT_MODEL_ID` — a Bedrock model id. **In most regions other than
+  `us-east-1`/`us-west-2` this needs to be a cross-region inference profile
+  id, not the bare model id** (e.g. `eu.anthropic.claude-sonnet-4-6`, not
+  `anthropic.claude-sonnet-4-6`) — see the detailed comment above
+  `AGENT_MODEL_ID` in `.env.example` for how to find the right one and the
+  exact error you'll hit if this is wrong (`ValidationException: The
+  provided model identifier is invalid`)
+
+Everything else in `.env.example` is optional and commented out by default
+— the agent runs a complete turn with all of it unset. Leave it alone for
+now; step 5 covers what each optional module needs.
+
+### 3. Run the agent + the companion MCP server
+
+Two processes, two terminals:
+
+```powershell
+# Terminal 1 — this repo
 python -m ai_agent_template
 ```
 
-Server listens on `HOST`/`PORT` (default `0.0.0.0:3002`). For tools to
-resolve, also run the companion MCP server in another terminal:
-
 ```powershell
+# Terminal 2 — the companion mcp-server-template, with its bundled mock
+# backend so you don't need a real GraphQL API to try this
 cd ..\mcp-server-template
 $env:MOCK_BACKEND=1
 python -m mcp_server_template
 ```
 
-Every optional module (AgentCore memory, KB retrieval, observability,
-CloudWatch) is disabled until its env vars are set — see `.env.example`
-for the full list and what each one gates.
+The agent listens on `HOST`/`PORT` (default `0.0.0.0:3002`) and needs the
+MCP server reachable at `MCP_SERVER_URL` (default
+`http://localhost:3001/mcp`) for any tool call to resolve — without it, the
+agent still starts, but every turn that needs a tool fails.
+
+**Prefer one click over two terminals?** `templates.code-workspace` (one
+level up, alongside this repo) is a multi-root VS Code workspace with a
+debug compound that launches the MCP server, this agent, and the companion
+UI together — open it in VS Code, then Run and Debug → "🟢 Local — MCP +
+Agent + UI".
+
+### 4. Talk to it
+
+The agent speaks a WebSocket protocol at `WS /api/agent` — point the
+companion `agent-chat-ui-template` at it, or any WebSocket client. See
+[`DEMO-QUERIES.md`](DEMO-QUERIES.md) for one ready-to-paste example query
+per feature (plain MCP tool call, HITL approval, orchestration, memory,
+code execution) — useful both as a manual smoke test and as a demo script.
+
+### 5. Optional modules
+
+AgentCore memory, Bedrock Knowledge Base retrieval, observability,
+CloudWatch, and the `run_python` code-execution tool are all disabled until
+their env vars are set — see `.env.example` for the full list. The two
+AgentCore-backed ones (long-term memory, code execution) need you to
+**provision a real AWS resource first** (not something this template
+creates) — `.env.example`'s comments above `AGENTCORE_MEMORY_ID` and
+`AGENTCORE_CODE_INTERPRETER_ID` walk through where to create each one and
+what to paste back. Skip this section entirely for a first run — nothing
+here is required to see a working turn.
 
 ## Status
 
