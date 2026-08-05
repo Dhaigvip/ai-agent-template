@@ -52,6 +52,9 @@ dependencies = [
     "aws-opentelemetry-distro>=0.17.1,<0.18",
     "opentelemetry-api>=1.40.0,<2",
     "opentelemetry-sdk>=1.40.0,<2",
+    # Orchestration tool (Task 17) — RestrictedPython exec harness for
+    # run_orchestration's local, in-process sandbox.
+    "RestrictedPython>=7.4,<8",
 ]
 
 [project.optional-dependencies]

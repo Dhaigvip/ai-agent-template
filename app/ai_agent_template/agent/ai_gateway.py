@@ -25,12 +25,15 @@ from ai_agent_template.agent.graph_builder import (
     _on_persistence_degraded,
 )
 from ai_agent_template.agent.middleware.risk_classifier import is_blocked_tool
+from ai_agent_template.agent.orchestration.orchestration_tool import orchestration_tool
 from ai_agent_template.agent.resilient_persistence import _is_credential_error
 from ai_agent_template.agent.system_prompt import DEFAULT_SYSTEM_PROMPT
 from ai_agent_template.agent.utils.log import agent_log, set_log_context
 from ai_agent_template.agent.utils.performance import PerfCounters, TurnContext
 from ai_agent_template.agent.utils.tool_helpers import create_synthetic_tools, mcp_tool_to_langchain
 from ai_agent_template.agent.wire import stream_wire_events
+from ai_agent_template.analysis.code_exec_tool import code_exec_tool
+from ai_agent_template.analysis.code_execution_service import get_code_execution_service
 from ai_agent_template.config import AppConfig
 from ai_agent_template.knowledge_base import get_kb_client
 from ai_agent_template.mcp.client import MCPClient
@@ -411,7 +414,23 @@ class AIGateway:
                 bedrock_profile=self._config.bedrock.profile,
             )
             kb_tools = [kb.kb_retrieve_tool(on_degraded=_on_persistence_degraded)] if kb else []
-            all_tools = [*mcp_tools, *create_synthetic_tools(), *kb_tools]
+
+            code_exec_service = get_code_execution_service(
+                self._config.code_execution, bedrock_region=self._config.bedrock.region
+            )
+            code_exec_tools = [code_exec_tool(code_exec_service)] if code_exec_service else []
+
+            base_tools = [*mcp_tools, *create_synthetic_tools(), *kb_tools, *code_exec_tools]
+
+            # run_orchestration needs the rest of the registry by name (see
+            # orchestration_tool.py's docstring) — built from base_tools only,
+            # since it never needs to call itself.
+            orchestration_tools = (
+                [orchestration_tool({t.name: t for t in base_tools}, self._config.orchestration)]
+                if self._config.features.orchestration_enabled
+                else []
+            )
+            all_tools = [*base_tools, *orchestration_tools]
 
             self._graph_runtime = build_graph(
                 config=self._config, tools=all_tools, system_prompt=DEFAULT_SYSTEM_PROMPT

@@ -182,20 +182,62 @@ class ObservabilityConfig:
 
 
 @dataclass
+class OrchestrationConfig:
+    """`run_orchestration` — a local, in-process RestrictedPython sandbox for
+    calling already-bound tools in a dependent chain/branch/reshape/loop.
+    Gated solely by `FeatureFlags.orchestration_enabled`: unlike code
+    execution (Task 16), this tool has no external AWS resource to gate on,
+    so there's nothing here that needs its own id-presence check.
+
+    Defaults match `agent/orchestration/sandbox.py`'s own module constants —
+    kept here instead of read from `os.environ` inline so every env read in
+    this project stays centralized in `load_config()` (see Task 13's
+    observability config for the same reasoning).
+    """
+
+    timeout_seconds: float = 15.0
+    max_result_chars: int = 4000
+    max_calls: int = 256
+    call_timeout_seconds: float = 15.0
+
+
+@dataclass
+class CodeExecutionConfig:
+    """`run_python` — a remote AgentCore Code Interpreter sandbox for data
+    analysis/charts (statistics, aggregation, Plotly). Distinct from
+    Task 17's `run_orchestration`: this tool has NO access to this project's
+    own tools at all, it only runs Python with pandas/numpy/plotly.
+
+    `interpreter_id` unset (default) means code execution is entirely
+    disabled: `code_exec_tool()` is never added to the toolset. Same
+    id-presence gating as `KnowledgeBaseConfig.kb_id` / `MemoryConfig.memory_id`
+    — no separate enabled flag. (This template's Task 2 originally scaffolded
+    `FeatureFlags.code_execution_enabled` before this config existed; retired
+    here for the same drift reason `AGENT_KNOWLEDGE_BASE_ENABLED` was retired
+    in Task 18 — an id set with the flag off would silently do nothing.)
+    """
+
+    interpreter_id: str | None = None
+    region: str | None = None  # falls back to BedrockConfig.region when unset
+    exec_timeout_seconds: int = 90  # wall-clock ceiling per run_python call
+    sandbox_idle_timeout_seconds: int = 300  # AgentCore session idle timeout
+
+
+@dataclass
 class FeatureFlags:
     """One flag per optional module. All default False — see module
     docstring. Each flag's real config (model IDs, endpoints, limits) lands
     with its own task; this is just the on/off switch.
 
-    AgentCore memory and the knowledge base have no flag here —
-    MemoryConfig.memory_id / KnowledgeBaseConfig.kb_id unset IS "disabled",
-    same pattern as GuardrailConfig.guardrail_id. A separate enabled flag
-    next to either would just invite drift (id set but the flag off,
-    silently unused)."""
+    AgentCore memory, the knowledge base, and code execution have no flag
+    here — MemoryConfig.memory_id / KnowledgeBaseConfig.kb_id /
+    CodeExecutionConfig.interpreter_id unset IS "disabled", same pattern as
+    GuardrailConfig.guardrail_id. A separate enabled flag next to any of
+    these would just invite drift (id set but the flag off, silently
+    unused)."""
 
     observability_enabled: bool = False
     document_ingestion_enabled: bool = False
-    code_execution_enabled: bool = False
     orchestration_enabled: bool = False
 
 
@@ -214,6 +256,8 @@ class AppConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     knowledge_base: KnowledgeBaseConfig = field(default_factory=KnowledgeBaseConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    orchestration: OrchestrationConfig = field(default_factory=OrchestrationConfig)
+    code_execution: CodeExecutionConfig = field(default_factory=CodeExecutionConfig)
     features: FeatureFlags = field(default_factory=FeatureFlags)
 
 
@@ -278,15 +322,28 @@ def load_config() -> AppConfig:
             cloudwatch_log_group=os.environ.get("CLOUDWATCH_LOG_GROUP"),
             cloudwatch_log_stream=os.environ.get("CLOUDWATCH_LOG_STREAM"),
         ),
+        orchestration=OrchestrationConfig(
+            timeout_seconds=float(os.environ.get("AGENT_ORCHESTRATION_TIMEOUT_SECONDS", "15.0")),
+            max_result_chars=int(os.environ.get("AGENT_ORCHESTRATION_MAX_RESULT_CHARS", "4000")),
+            max_calls=int(os.environ.get("AGENT_ORCHESTRATION_MAX_CALLS", "256")),
+            call_timeout_seconds=float(
+                os.environ.get("AGENT_ORCHESTRATION_CALL_TIMEOUT_SECONDS", "15.0")
+            ),
+        ),
+        code_execution=CodeExecutionConfig(
+            interpreter_id=os.environ.get("AGENTCORE_CODE_INTERPRETER_ID"),
+            region=os.environ.get("AGENT_CODE_EXECUTION_REGION"),
+            exec_timeout_seconds=int(os.environ.get("AGENT_CODE_EXECUTION_TIMEOUT_SECONDS", "90")),
+            sandbox_idle_timeout_seconds=int(
+                os.environ.get("AGENT_CODE_EXECUTION_SANDBOX_IDLE_TIMEOUT_SECONDS", "300")
+            ),
+        ),
         features=FeatureFlags(
             observability_enabled=_parse_bool(
                 os.environ.get("AGENT_OBSERVABILITY_ENABLED"), default=False
             ),
             document_ingestion_enabled=_parse_bool(
                 os.environ.get("AGENT_DOCUMENT_INGESTION_ENABLED"), default=False
-            ),
-            code_execution_enabled=_parse_bool(
-                os.environ.get("AGENT_CODE_EXECUTION_ENABLED"), default=False
             ),
             orchestration_enabled=_parse_bool(
                 os.environ.get("AGENT_ORCHESTRATION_ENABLED"), default=False
