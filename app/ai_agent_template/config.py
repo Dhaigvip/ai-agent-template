@@ -6,8 +6,10 @@ one load_config() entry point, .env loaded once via python-dotenv. The two
 templates should feel like the same project.
 
 Naming: unprefixed vars are server-level (HOST, PORT, LOG_LEVEL) or standard
-AWS SDK names (AWS_REGION, AWS_PROFILE); AGENT_* is this project's own
-prefix, used throughout instead of any product-specific prefix.
+SDK names (AWS_REGION, AWS_PROFILE, OPENAI_API_KEY — the latter follows the
+same "use the SDK's own standard var name" convention as the AWS ones, not
+an inconsistency); AGENT_* is this project's own prefix, used throughout
+instead of any product-specific prefix.
 
 Feature flags default OFF. Every flagged module (document ingestion, code
 execution, orchestration, knowledge base, AgentCore memory, observability)
@@ -77,6 +79,36 @@ def _parse_cache_scope(raw: str | None, *, default: str = "full") -> str:
     return default
 
 
+_VALID_PROVIDERS = {"bedrock", "openai"}
+
+
+def _parse_provider(raw: str | None, *, default: str = "openai") -> str:
+    """Tolerant provider parsing — same inline-comment/whitespace tolerance
+    as _parse_bool/_parse_cache_scope. Defaults to OpenAI: zero-config,
+    just OPENAI_API_KEY. Bedrock is still the recommended provider for
+    production (AgentCore memory, Bedrock Guardrails, Bedrock Knowledge
+    Base, CloudWatch/ADOT all require it) but needs real AWS setup, so it's
+    opt-in via AGENT_MODEL_PROVIDER=bedrock rather than the default. An
+    unrecognized provider warns and falls back to this default rather than
+    crashing the server over a typo."""
+    if raw is None:
+        return default
+    value = raw.split("#", 1)[0].strip().lower()
+    if not value:
+        return default
+    if value in _VALID_PROVIDERS:
+        return value
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "Unrecognized AGENT_MODEL_PROVIDER=%r (valid: %s) - using %r",
+        raw,
+        ", ".join(sorted(_VALID_PROVIDERS)),
+        default,
+    )
+    return default
+
+
 @dataclass
 class ServerConfig:
     host: str = "0.0.0.0"
@@ -87,17 +119,28 @@ class ServerConfig:
 
 @dataclass
 class BedrockConfig:
-    """Bedrock is the model provider, full stop — no abstraction over it.
-    `region` has no default on purpose: hardcoding a real deployment's
-    region as a fallback is a cloud-settings leak, so operators must set
-    AWS_REGION explicitly instead.
+    """Bedrock is the recommended provider for production use — AgentCore
+    memory, Bedrock Guardrails, Bedrock Knowledge Base, and CloudWatch/ADOT
+    observability all require it and stay Bedrock-only regardless of which
+    provider AppConfig.provider selects — but it's opt-in
+    (AGENT_MODEL_PROVIDER=bedrock), not the default; OpenAI is (see
+    OpenAIConfig below), since it needs nothing but an API key to run.
+
+    `region` defaults to empty string, not a real region: hardcoding one as
+    a fallback is a cloud-settings leak, so operators must set AWS_REGION
+    explicitly to use anything Bedrock-shaped. load_config() enforces this
+    is actually set (raises) exactly when it's required — provider is
+    "bedrock", or knowledge_base.kb_id / code_execution.interpreter_id is
+    set, since those two stay Bedrock-only unconditionally. Defaulted here
+    (rather than required-no-default) so AppConfig itself needs zero
+    arguments to construct — matches OpenAI being the zero-config default.
     """
 
-    region: str
+    region: str = ""
     model_id: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
     # Cross-region inference-profile ARNs need an explicit vendor hint — this
     # is Bedrock's own "provider" kwarg (anthropic/amazon/meta/...), unrelated
-    # to the multi-vendor abstraction this template deliberately doesn't have.
+    # to AppConfig.provider (which model provider is active at all).
     model_vendor_override: str | None = None
     api_key: str | None = None  # bearer token -> AWS_BEARER_TOKEN_BEDROCK
     profile: str | None = None  # AWS_PROFILE; ignored when api_key is set
@@ -110,14 +153,41 @@ class BedrockConfig:
 
 
 @dataclass
+class OpenAIConfig:
+    """OpenAI provider config — only consulted when AppConfig.provider ==
+    "openai". `api_key` left None by default: langchain-openai's ChatOpenAI
+    reads the standard OPENAI_API_KEY env var itself if unset here, the same
+    permissive pattern as BedrockConfig.profile falling back to ambient AWS
+    credential resolution. `base_url` supports OpenAI-compatible endpoints
+    (Azure OpenAI, local proxies, etc.) without a separate config shape.
+
+    Selecting this provider does not disable AgentCore memory, Bedrock
+    Guardrails, or Bedrock Knowledge Base configuration — it just means
+    those features silently stay off (memory/guardrails degrade to
+    in-memory / a keyword-blocklist fallback; KB requires Bedrock regardless
+    and would need AWS_REGION set separately if used alongside OpenAI).
+    """
+
+    api_key: str | None = None
+    model_id: str = "gpt-4o-mini"
+    base_url: str | None = None
+    timeout: int = 60
+    max_retries: int = 2
+
+
+@dataclass
 class GuardrailConfig:
-    """Bedrock input guardrail — fail-open by design (see
+    """Input guardrail — fail-open by design (see
     middleware/input_guardrail.py): unconfigured or erroring, the turn
-    proceeds. `guardrail_id` unset (the default) means no guardrail at all,
-    not an error."""
+    proceeds. `guardrail_id` unset (the default) means no Bedrock guardrail
+    configured. When AppConfig.provider != "bedrock", the Bedrock guardrail
+    is never consulted regardless of `guardrail_id` — see
+    middleware/guardrail_fallback.py for the non-Bedrock path, which uses a
+    small built-in keyword blocklist plus `blocklist_terms` below."""
 
     guardrail_id: str | None = None
     guardrail_version: str = "DRAFT"
+    blocklist_terms: str | None = None  # comma-separated extra terms for the fallback guardrail
 
 
 @dataclass
@@ -243,10 +313,14 @@ class FeatureFlags:
 
 @dataclass
 class AppConfig:
-    # Required, no default — must come before the defaulted fields below
-    # (dataclass field-ordering rule), same shape as mcp-server-template's
-    # AppConfig.graphql (also required-first).
-    bedrock: BedrockConfig
+    # "openai" (default, zero-config) or "bedrock" (recommended for
+    # production — see BedrockConfig docstring for why). Neither this nor
+    # `bedrock` below is required-no-default anymore: AppConfig() alone is
+    # a valid, fully zero-config construction now that OpenAI is the
+    # default provider.
+    provider: str = "openai"
+    bedrock: BedrockConfig = field(default_factory=BedrockConfig)
+    openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
     # Base config for the app-wide MCP client — agent_session_id is left
@@ -262,12 +336,25 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    region = os.environ.get("AWS_REGION")
-    if not region:
+    provider = _parse_provider(os.environ.get("AGENT_MODEL_PROVIDER"))
+
+    # Read ahead of the region check: KB and code execution stay Bedrock-only
+    # regardless of provider, so either one being configured still requires
+    # AWS_REGION even when provider=="openai". Reused below when building
+    # KnowledgeBaseConfig/CodeExecutionConfig rather than re-reading.
+    kb_id = os.environ.get("AGENT_KB_ID")
+    interpreter_id = os.environ.get("AGENTCORE_CODE_INTERPRETER_ID")
+
+    region_env = os.environ.get("AWS_REGION")
+    region_required = provider == "bedrock" or bool(kb_id) or bool(interpreter_id)
+    if region_required and not region_env:
         raise RuntimeError(
-            "AWS_REGION environment variable is required - no default, so a region "
-            "never silently leaks from this template into your deployment"
+            "AWS_REGION environment variable is required when AGENT_MODEL_PROVIDER=bedrock "
+            "(the default), or when AGENT_KB_ID / AGENTCORE_CODE_INTERPRETER_ID is set - "
+            "those two stay Bedrock-only regardless of provider. No default, so a region "
+            "never silently leaks from this template into your deployment."
         )
+    region = region_env or ""
 
     return AppConfig(
         bedrock=BedrockConfig(
@@ -287,6 +374,14 @@ def load_config() -> AppConfig:
             prompt_cache_scope=_parse_cache_scope(os.environ.get("AGENT_PROMPT_CACHE_SCOPE")),
             prompt_cache_ttl=os.environ.get("AGENT_PROMPT_CACHE_TTL") or None,
         ),
+        provider=provider,
+        openai=OpenAIConfig(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            model_id=os.environ.get("AGENT_OPENAI_MODEL_ID", "gpt-4o-mini"),
+            base_url=os.environ.get("AGENT_OPENAI_BASE_URL") or None,
+            timeout=int(os.environ.get("AGENT_OPENAI_TIMEOUT", "60")),
+            max_retries=int(os.environ.get("AGENT_OPENAI_MAX_RETRIES", "2")),
+        ),
         server=ServerConfig(
             host=os.environ.get("HOST", "0.0.0.0"),
             port=int(os.environ.get("PORT", "3002")),
@@ -296,6 +391,7 @@ def load_config() -> AppConfig:
         guardrail=GuardrailConfig(
             guardrail_id=os.environ.get("AGENT_GUARDRAIL_ID"),
             guardrail_version=os.environ.get("AGENT_GUARDRAIL_VERSION", "DRAFT"),
+            blocklist_terms=os.environ.get("AGENT_GUARDRAIL_BLOCKLIST"),
         ),
         mcp=MCPClientConfig(
             server_url=os.environ.get("MCP_SERVER_URL", "http://localhost:3001/mcp"),
@@ -311,7 +407,7 @@ def load_config() -> AppConfig:
             ),
         ),
         knowledge_base=KnowledgeBaseConfig(
-            kb_id=os.environ.get("AGENT_KB_ID"),
+            kb_id=kb_id,
             region=os.environ.get("AGENT_KB_REGION"),
             chunks=int(os.environ.get("AGENT_KB_CHUNKS", "3")),
             max_chars=int(os.environ.get("AGENT_KB_MAX_CHARS", "2000")),
@@ -331,7 +427,7 @@ def load_config() -> AppConfig:
             ),
         ),
         code_execution=CodeExecutionConfig(
-            interpreter_id=os.environ.get("AGENTCORE_CODE_INTERPRETER_ID"),
+            interpreter_id=interpreter_id,
             region=os.environ.get("AGENT_CODE_EXECUTION_REGION"),
             exec_timeout_seconds=int(os.environ.get("AGENT_CODE_EXECUTION_TIMEOUT_SECONDS", "90")),
             sandbox_idle_timeout_seconds=int(

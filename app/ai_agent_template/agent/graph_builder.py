@@ -81,9 +81,13 @@ def _on_persistence_degraded(feature: str, message: str) -> None:
 def get_checkpointer(config: AppConfig) -> BaseCheckpointSaver:
     """Return the checkpointer for conversation state.
 
-    1. AgentCoreMemorySaver — when AGENTCORE_MEMORY_ID is set AND
+    1. AgentCoreMemorySaver — when provider=="bedrock" AND
+       AGENTCORE_MEMORY_ID is set AND
        AGENT_AGENTCORE_CHECKPOINTER_ENABLED=true (opt-in, off by default)
-    2. MemorySaver — in-process fallback (dev/local; lost on restart)
+    2. MemorySaver — in-process fallback (dev/local; lost on restart; also
+       the unconditional choice whenever provider != "bedrock", since
+       AgentCore fundamentally requires AWS/Bedrock regardless of
+       AGENTCORE_MEMORY_ID)
 
     AgentCore checkpointing is opt-in and OFF by default even when
     AGENTCORE_MEMORY_ID is set: langgraph-checkpoint-aws 1.0.7 doesn't
@@ -97,7 +101,9 @@ def get_checkpointer(config: AppConfig) -> BaseCheckpointSaver:
     conversation transcript unless explicitly opted in.
     """
     memory = config.memory
-    use_agentcore = bool(memory.memory_id) and memory.checkpointer_enabled
+    use_agentcore = (
+        config.provider == "bedrock" and bool(memory.memory_id) and memory.checkpointer_enabled
+    )
     if use_agentcore:
         try:
             from langgraph_checkpoint_aws import AgentCoreMemorySaver  # type: ignore[import]
@@ -132,13 +138,17 @@ def get_checkpointer(config: AppConfig) -> BaseCheckpointSaver:
 def get_memory_store(config: AppConfig) -> BaseStore:
     """Return a store for long-term cross-session memory.
 
-    1. AgentCoreMemoryStore — when AGENTCORE_MEMORY_ID is set (AWS-managed, with semantic search)
-    2. InMemoryStore — always-present in-process fallback (lost on restart, dev/local only)
+    1. AgentCoreMemoryStore — when provider=="bedrock" AND AGENTCORE_MEMORY_ID
+       is set (AWS-managed, with semantic search)
+    2. InMemoryStore — always-present in-process fallback (lost on restart,
+       dev/local only; also the unconditional choice whenever
+       provider != "bedrock", since AgentCore fundamentally requires
+       AWS/Bedrock regardless of AGENTCORE_MEMORY_ID)
 
     The store is always non-None so nodes can call store.asearch/aput unconditionally.
     """
     memory: MemoryConfig = config.memory
-    if memory.memory_id:
+    if config.provider == "bedrock" and memory.memory_id:
         try:
             from langgraph_checkpoint_aws import AgentCoreMemoryStore  # type: ignore[import]
 
@@ -200,6 +210,7 @@ def assemble_agent_graph(
     store: BaseStore,
     bedrock: BedrockConfig,
     memory: MemoryConfig,
+    provider: str,
 ) -> Any:
     """Assemble create_agent on AgentState with the middleware chain."""
     from langchain.agents import create_agent
@@ -215,7 +226,12 @@ def assemble_agent_graph(
         ContextOverflowRetryMiddleware(),
         MemoryWriteMiddleware(memory),
     ]
-    cache_control = build_cache_control(bedrock)
+    # Bedrock cachePoint semantics only — OpenAI caches automatically
+    # server-side, no cache_control kwarg to set. build_cache_control()
+    # already returns None unless bedrock.prompt_cache_enabled is set (off
+    # by default), but the explicit provider guard makes the intent clear
+    # rather than relying on that default alone.
+    cache_control = build_cache_control(bedrock) if provider == "bedrock" else None
     if cache_control is not None:
         # Outermost wrap_model_call so model_settings are set before inner
         # middleware overrides other fields; each middleware overrides a
@@ -251,7 +267,7 @@ def build_graph(
     separate concern layered in later without this function's shape
     changing, just what its caller passes in.
     """
-    model = create_model(config.bedrock)
+    model = create_model(config)
     checkpointer = get_checkpointer(config)
     store = get_memory_store(config)
     graph = assemble_agent_graph(
@@ -262,6 +278,7 @@ def build_graph(
         store=store,
         bedrock=config.bedrock,
         memory=config.memory,
+        provider=config.provider,
     )
     logger.info("build_graph: graph compiled (%d tool(s))", len(tools))
     return BuiltGraph(graph=graph, checkpointer=checkpointer, memory_store=store)

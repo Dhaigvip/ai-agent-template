@@ -318,17 +318,19 @@ class AIGateway:
         # MCP connect. Decoupled from the model (not bound per-iteration). Fail-open.
         from ai_agent_template.agent.middleware.input_guardrail import apply_input_guardrail
 
-        gr = await apply_input_guardrail(
-            user_message,
-            guardrail=self._config.guardrail,
-            region=self._config.bedrock.region,
-            profile=self._config.bedrock.profile,
-        )
+        gr = await apply_input_guardrail(user_message, config=self._config)
         if gr.blocked:
             agent_log(log, logging.WARNING, "turn.guardrail_blocked", policies=gr.policies)
             yield {"type": "text_commit", "as": "answer", "text": gr.message}
             yield {"type": "done"}
             return
+        if gr.sanitized_text is not None:
+            # Non-Bedrock PII fallback: not blocked, but the raw text carried
+            # incidental PII (email/credit_card/mac_address) — substitute the
+            # redacted version so it's what actually enters the graph/model,
+            # not just what got logged. See guardrail_fallback.py.
+            agent_log(log, logging.INFO, "turn.guardrail_redacted", policies=gr.policies)
+            user_message = gr.sanitized_text
 
         # Build graph on first turn
         try:

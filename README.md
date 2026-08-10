@@ -6,8 +6,9 @@ restarts mid-decision, when the token bill for describing a few dozen tools
 on every turn quietly eats your margin, or when a mutation gets buried three
 layers inside a sandboxed script where nothing can review it before it runs.
 
-`ai-agent-template` is a LangGraph agent on Bedrock built around those
-specific failure modes: human-in-the-loop approval that survives a restart
+`ai-agent-template` is a LangGraph agent, Bedrock-first with OpenAI as a
+second supported provider, built around those specific failure modes:
+human-in-the-loop approval that survives a restart
 because the interrupt lives in the checkpoint, not the process; prompt
 caching that's actually measured instead of just claimed; tools sourced
 entirely from a companion MCP server instead of hand-registered one by one;
@@ -50,16 +51,29 @@ you have to trust.
 - **WebSocket API** at `/api/agent`, plus `/health` and
   `/api/agent/download/{file_id}` (charts/files `run_python` produces).
 
-## Current provider scope
+## Model providers
 
-**Bedrock only, currently** — not the three-provider (Bedrock/OpenAI/
-Anthropic-direct) design this was originally scoped for. The provider
-interface, conformance-test-suite, and OpenAI/Anthropic-direct adapters
-are not yet built; `pyproject.toml` and `.env.example` both reflect
-Bedrock as the only supported provider today. Multi-provider support is
-the natural next step for this template, not a design dead-end — the
-middleware chain above doesn't assume Bedrock specifically anywhere except
-the prompt-cache middleware and the model client itself.
+**OpenAI is the default — zero config beyond an API key.** Both provider
+SDKs ship as core dependencies, so a plain `pip install -e .` works either
+way; there's no separate extras step for either.
+
+**Bedrock is recommended for production** — AgentCore memory, Bedrock
+Guardrails, Bedrock Knowledge Base, and CloudWatch/ADOT observability all
+require it and stay Bedrock-only regardless of which provider you pick for
+the model call itself; they're not something OpenAI support tries to
+replicate. Opt in with `AGENT_MODEL_PROVIDER=bedrock` plus real AWS setup
+(see Quickstart below) — this is a deliberate choice, not a temporary
+limitation, see `CLAUDE.md`'s "Cloud coupling" section for the full
+reasoning.
+
+**Running on OpenAI**, short/long-term memory automatically fall back to
+plain in-memory persistence (the same fallback that already runs when
+AgentCore isn't configured at all), and the input guardrail falls back to
+a keyword blocklist plus LangChain's own built-in PII detection
+(email/credit-card/MAC-address redaction, no extra dependency) instead of
+Bedrock Guardrails. Neither fallback is a like-for-like replacement for
+the Bedrock-backed features — they keep the agent fully functional without
+AWS, not at parity with it.
 
 ## Quickstart
 
@@ -69,6 +83,13 @@ each step says what breaks if you skip it.
 ### 1. Prerequisites
 
 - **Python 3.12+**
+- **An OpenAI API key** — that's it for the default path. Want Bedrock
+  instead (recommended for production — see "Model providers" above)?
+  Expand the box below; otherwise skip straight to step 2.
+
+<details>
+<summary>Using Bedrock instead (<code>AGENT_MODEL_PROVIDER=bedrock</code>)</summary>
+
 - An **AWS account with Bedrock model access enabled** for whichever Claude
   model you plan to use, in whichever region you plan to use. This is a
   one-time per-account/per-region step done in the AWS Console (Bedrock >
@@ -85,6 +106,8 @@ each step says what breaks if you skip it.
   to enable `AGENTCORE_MEMORY_ID` or `AGENTCORE_CODE_INTERPRETER_ID` in
   step 5, use `AWS_PROFILE` or the explicit access-key triple instead.
 
+</details>
+
 ### 2. Install and configure
 
 ```powershell
@@ -94,7 +117,14 @@ pip install -e .
 copy .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` — default (OpenAI) path:
+- `OPENAI_API_KEY` — that's it. `AGENT_MODEL_PROVIDER` already defaults to
+  `openai` in `.env.example`.
+
+<details>
+<summary>Bedrock path instead</summary>
+
+- Set `AGENT_MODEL_PROVIDER=bedrock`
 - `AWS_REGION` — required, no default (this template deliberately never
   guesses a region for you)
 - One of the credential options from step 1
@@ -105,6 +135,8 @@ Edit `.env`:
   `AGENT_MODEL_ID` in `.env.example` for how to find the right one and the
   exact error you'll hit if this is wrong (`ValidationException: The
   provided model identifier is invalid`)
+
+</details>
 
 Everything else in `.env.example` is optional and commented out by default
 — the agent runs a complete turn with all of it unset. Leave it alone for
@@ -160,11 +192,12 @@ here is required to see a working turn.
 
 ## Status
 
-Core agent loop, middleware chain, HITL, MCP tool sourcing, and the
-optional modules above are implemented. Not yet built: the
-provider-agnostic interface (OpenAI/Anthropic-direct support) and its
-conformance test suite, and the automated test suite generally. See
-`docs/adr/` for design decisions as they're made.
+Core agent loop, middleware chain, HITL, MCP tool sourcing, both model
+providers (Bedrock + OpenAI), and the optional modules above are
+implemented, each with structural tests (no live AWS or OpenAI calls
+anywhere in the suite). Not yet built: a broader automated test suite
+covering the earlier middleware/state/wire-protocol modules end to end
+(tracked separately). See `docs/adr/` for design decisions as they're made.
 
 ## License
 

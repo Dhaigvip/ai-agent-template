@@ -1,6 +1,6 @@
 ﻿# AI Agent Architecture
 
-A production-shaped LangGraph AI agent with middleware execution engine, human-in-the-loop with stateless resume, and Bedrock model provider.
+A production-shaped LangGraph AI agent with middleware execution engine, human-in-the-loop with stateless resume, and a Bedrock-first (OpenAI also supported) model provider.
 
 ## System Overview
 
@@ -202,18 +202,22 @@ Each middleware is independent, testable, and composed in order:
 
 ## Configuration
 
-Environment variables (all `AGENT_` prefixed):
+Environment variables (`AGENT_*` for this project's own knobs; unprefixed
+for standard SDK names like `AWS_REGION`/`OPENAI_API_KEY`). Full list with
+defaults in `.env.example`; this is the subset most relevant to provider
+selection and the modules above.
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `AGENT_MODEL_ID` | Bedrock model to use | `anthropic.claude-3-5-sonnet-20241022-v2:0` |
-| `AGENT_REGION` | AWS region | `us-west-2` |
-| `AGENT_MAX_TOKENS` | Context window limit | `4096` |
-| `AGENT_KB_ID` | Knowledge base ID (optional) | (UUID) |
-| `AGENT_MEMORY_ENABLED` | Enable AgentCore memory | `true` |
-| `AGENT_OBSERVABILITY_ENABLED` | Enable CloudWatch observability | `true` |
-| `AGENT_GATEWAY_STRATEGY_ID` | Gateway strategy ID (optional) | (UUID) |
-| `MCP_SERVER_URL` | MCP server endpoint | `http://localhost:3001` |
+| `AGENT_MODEL_PROVIDER` | Model provider — "bedrock" (default) or "openai" | `bedrock` |
+| `AWS_REGION` | AWS region — required for `provider=bedrock`, or if KB/code-execution is used | `us-east-1` |
+| `AGENT_MODEL_ID` | Bedrock model id | `anthropic.claude-3-5-sonnet-20241022-v2:0` |
+| `OPENAI_API_KEY` | OpenAI key — only read when `provider=openai` | (secret) |
+| `AGENT_OPENAI_MODEL_ID` | OpenAI model id | `gpt-4o-mini` |
+| `AGENT_KB_ID` | Bedrock Knowledge Base ID (optional, Bedrock-only) | (UUID) |
+| `AGENTCORE_MEMORY_ID` | AgentCore memory ID (optional, Bedrock-only) | (UUID) |
+| `AGENT_OBSERVABILITY_ENABLED` | Enable ADOT/CloudWatch observability | `true` |
+| `MCP_SERVER_URL` | MCP server endpoint | `http://localhost:3001/mcp` |
 
 ## Data Flow: A Complete Turn
 
@@ -228,7 +232,7 @@ Environment variables (all `AGENT_` prefixed):
 
 ## Key Design Decisions
 
-1. **No Provider Abstraction** - Bedrock-only, fully coupled. Prompt caching, guardrails, AgentCore sandbox all stay as first-class features.
+1. **No Heavy Provider Abstraction, Two Providers Anyway** - OpenAI is the zero-config default; Bedrock is recommended for production via a plain `if/else` dispatch in `create_model()`, not a Protocol or conformance-suite interface. Prompt caching, Bedrock Guardrails, and AgentCore/KB/CloudWatch stay Bedrock-only, first-class features regardless of provider — short/long-term memory fall back to in-memory and guardrails fall back to a keyword blocklist + LangChain's built-in PII detection when the provider isn't Bedrock.
 
 2. **Middleware Over Graph Nodes** - Concerns like caching, guardrails, lifecycle are separate middleware, not baked into the graph structure.
 

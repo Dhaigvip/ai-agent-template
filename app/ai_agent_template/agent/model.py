@@ -1,11 +1,18 @@
-"""Bedrock model factory.
+"""Model factory — OpenAI (zero-config default) or Bedrock (recommended
+for production).
 
-No provider abstraction — "Cloud coupling: Bedrock only, on
-purpose". create_model() is still the one entry point every call site uses
-(the main agent model, a cheaper summarization model, ...): even with a
-single provider, one seam here means every caller stays stable if the
-construction details change later, matching how the reference itself always
-calls create_model() rather than the Bedrock-specific builder directly.
+create_model() is the one entry point every call site uses (the main agent
+model, a cheaper summarization model, ...) — that "one seam" property is
+unchanged from when this template was Bedrock-only: every caller still
+treats the result as a plain BaseChatModel, so nothing downstream needed to
+change shape when the OpenAI branch was added. What changed is the
+conclusion, not the reasoning: this still isn't a Protocol/interface with a
+cross-provider conformance suite (that was, and remains, unwarranted
+indirection) — it's a plain if/else dispatch on config.provider, the
+minimal thing that supports two real providers without the overengineering
+CLAUDE.md originally rejected. Both provider SDKs are core dependencies
+(see pyproject.toml) — a plain `pip install -e .` works for either without
+a separate extras step.
 """
 
 from __future__ import annotations
@@ -16,8 +23,10 @@ from typing import Any
 
 from botocore.config import Config as BotoConfig
 from langchain_aws import ChatBedrockConverse
+from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI
 
-from ai_agent_template.config import BedrockConfig
+from ai_agent_template.config import AppConfig, BedrockConfig, OpenAIConfig
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +91,7 @@ def build_cache_control(bedrock: BedrockConfig) -> dict | None:
     return cache_control
 
 
-def create_model(bedrock: BedrockConfig, model_id: str | None = None) -> ChatBedrockConverse:
+def _create_bedrock_model(bedrock: BedrockConfig, model_id: str | None = None) -> BaseChatModel:
     """Create a Bedrock chat model.
 
     model_id overrides bedrock.model_id when supplied — used for per-purpose
@@ -124,3 +133,28 @@ def create_model(bedrock: BedrockConfig, model_id: str | None = None) -> ChatBed
         )
         return model.bind(cache_control=cache_control)
     return model
+
+
+def _create_openai_model(openai_cfg: OpenAIConfig, model_id: str | None = None) -> BaseChatModel:
+    """Create an OpenAI chat model. No prompt-cache binding here — OpenAI
+    caches automatically server-side, there's no cachePoint-equivalent
+    kwarg to set; PromptCacheMiddleware is only ever wired in for the
+    Bedrock branch (see graph_builder.assemble_agent_graph)."""
+    kwargs: dict[str, Any] = {
+        "model": model_id or openai_cfg.model_id,
+        "timeout": openai_cfg.timeout,
+        "max_retries": openai_cfg.max_retries,
+    }
+    if openai_cfg.api_key:
+        kwargs["api_key"] = openai_cfg.api_key
+    if openai_cfg.base_url:
+        kwargs["base_url"] = openai_cfg.base_url
+
+    return ChatOpenAI(**kwargs)
+
+
+def create_model(config: AppConfig, model_id: str | None = None) -> BaseChatModel:
+    """Create the active provider's chat model — see module docstring."""
+    if config.provider == "openai":
+        return _create_openai_model(config.openai, model_id)
+    return _create_bedrock_model(config.bedrock, model_id)

@@ -31,9 +31,15 @@ dependencies = [
     "langchain>=1.3.14,<1.4",
     "langgraph>=1.2.9,<1.3",
     "langgraph-checkpoint>=4.1.1,<5",
-    # Bedrock is the only model provider this template supports — no other
-    # provider SDK.
+    # Two model providers, both core deps — a plain `pip install -e .` must
+    # work for either without a separate extras step. OpenAI is the default
+    # (AGENT_MODEL_PROVIDER=openai, zero-config beyond an API key); Bedrock
+    # is recommended for production since AgentCore memory, Bedrock
+    # Guardrails, Bedrock Knowledge Base, and CloudWatch/ADOT observability
+    # all require it regardless of which provider is selected (see
+    # CLAUDE.md "Cloud coupling") — opt-in via AGENT_MODEL_PROVIDER=bedrock.
     "langchain-aws>=1.5.0,<2",
+    "langchain-openai>=1.0,<2",
     "boto3>=1.43,<2",
     # MCP client — tools are sourced from the companion mcp-server-template.
     "mcp>=1.27.1,<2",

@@ -5,8 +5,13 @@ graph execution, not as part of the create_agent middleware chain (there's
 no per-model-call hook for it — one guardrail check per turn, not one per
 ReAct iteration, is the point). The gateway is the actual call site.
 
-Fail-open: if the guardrail is unconfigured or the API errors (e.g.
-credentials), the turn proceeds. Moderation must never take chat down.
+apply_input_guardrail() dispatches on config.provider: "bedrock" reaches
+_apply_bedrock_guardrail() below (the original Bedrock ApplyGuardrail path,
+unchanged); anything else reaches middleware/guardrail_fallback.py — a
+keyword blocklist plus an opportunistic LangChain-ecosystem moderation
+chain when one happens to be installed. Both paths are fail-open: if the
+guardrail is unconfigured or errors (e.g. credentials), the turn proceeds.
+Moderation must never take chat down.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from ai_agent_template.config import GuardrailConfig
+from ai_agent_template.config import AppConfig, GuardrailConfig
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +30,14 @@ class GuardrailResult:
     blocked: bool
     message: str = ""  # guardrail's configured block message, shown to the user
     policies: str = ""  # which policies tripped (for logging/diagnostics)
+    # Set only by the non-Bedrock PII fallback layer (guardrail_fallback.py):
+    # the turn is NOT blocked, but the caller must substitute this for the
+    # raw user message before it enters the graph — matches the reference's
+    # own documented guidance (GUARDRAILS.md) to anonymize PII rather than
+    # hard-block, so the conversation continues with masked values. Always
+    # None on the Bedrock path (ApplyGuardrail's PII policy is Anonymize/
+    # Block configured in AWS, not surfaced back through this dataclass).
+    sanitized_text: str | None = None
 
 
 _client = None
@@ -58,10 +71,10 @@ def _summarize_assessments(assessments: list) -> str:
     return ", ".join(dict.fromkeys(hits)) or "intervened"
 
 
-async def apply_input_guardrail(
+async def _apply_bedrock_guardrail(
     text: str, *, guardrail: GuardrailConfig, region: str, profile: str | None = None
 ) -> GuardrailResult:
-    """Validate the user's query against the configured guardrail (INPUT source only).
+    """Validate the user's query against the configured Bedrock guardrail (INPUT source only).
 
     Returns GuardrailResult(blocked=False) when no guardrail is configured, the text is
     empty, or the API errors (fail-open).
@@ -94,3 +107,27 @@ async def apply_input_guardrail(
     policies = _summarize_assessments(resp.get("assessments") or [])
     logger.warning("input_guardrail.blocked: policies=%s", policies)
     return GuardrailResult(blocked=True, message=message, policies=policies)
+
+
+async def apply_input_guardrail(text: str, *, config: AppConfig) -> GuardrailResult:
+    """Validate the user's query once per turn — the single call site every
+    caller uses regardless of provider. Dispatches to the Bedrock guardrail
+    above when config.provider == "bedrock"; otherwise to the fallback
+    guardrail (middleware/guardrail_fallback.py). Empty/whitespace-only
+    text short-circuits before either path — matches the "no meaningful
+    query" behavior the Bedrock path already had.
+    """
+    if not text or not text.strip():
+        return GuardrailResult(blocked=False)
+
+    if config.provider == "bedrock":
+        return await _apply_bedrock_guardrail(
+            text,
+            guardrail=config.guardrail,
+            region=config.bedrock.region,
+            profile=config.bedrock.profile,
+        )
+
+    from ai_agent_template.agent.middleware.guardrail_fallback import apply_fallback_guardrail
+
+    return await apply_fallback_guardrail(text, config=config)
