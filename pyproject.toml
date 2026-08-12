@@ -60,7 +60,7 @@ dependencies = [
     "opentelemetry-sdk>=1.40.0,<2",
     # Orchestration tool (Task 17) — RestrictedPython exec harness for
     # run_orchestration's local, in-process sandbox.
-    "RestrictedPython>=7.4,<8",
+    "RestrictedPython>=7.4,<9",
 ]
 
 [project.optional-dependencies]
